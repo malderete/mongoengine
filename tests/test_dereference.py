@@ -1,11 +1,13 @@
-from __future__ import with_statement
+# -*- coding: utf-8 -*-
+import sys
+sys.path[0:0] = [""]
 import unittest
 
 from bson import DBRef, ObjectId
 
 from mongoengine import *
 from mongoengine.connection import get_db
-from mongoengine.tests import query_counter
+from mongoengine.context_managers import query_counter
 
 
 class FieldTest(unittest.TestCase):
@@ -123,6 +125,27 @@ class FieldTest(unittest.TestCase):
         User.drop_collection()
         Group.drop_collection()
 
+    def test_list_item_dereference_dref_false_stores_as_type(self):
+        """Ensure that DBRef items are stored as their type
+        """
+        class User(Document):
+            my_id = IntField(primary_key=True)
+            name = StringField()
+
+        class Group(Document):
+            members = ListField(ReferenceField(User, dbref=False))
+
+        User.drop_collection()
+        Group.drop_collection()
+
+        user = User(my_id=1, name='user 1').save()
+
+        Group(members=User.objects).save()
+        group = Group.objects.first()
+
+        self.assertEqual(Group._get_collection().find_one()['members'], [1])
+        self.assertEqual(group.members, [user])
+
     def test_handle_old_style_references(self):
         """Ensure that DBRef items in ListFields are dereferenced.
         """
@@ -177,6 +200,10 @@ class FieldTest(unittest.TestCase):
         raw_data = Group._get_collection().find_one()
         self.assertTrue(isinstance(raw_data['author'], DBRef))
         self.assertTrue(isinstance(raw_data['members'][0], DBRef))
+        group = Group.objects.first()
+
+        self.assertEqual(group.author, user)
+        self.assertEqual(group.members, [user])
 
         # Migrate the model definition
         class Group(Document):
@@ -185,8 +212,9 @@ class FieldTest(unittest.TestCase):
 
         # Migrate the data
         for g in Group.objects():
-            g.author = g.author
-            g.members = g.members
+            # Explicitly mark as changed so resets
+            g._mark_as_changed('author')
+            g._mark_as_changed('members')
             g.save()
 
         group = Group.objects.first()
@@ -263,19 +291,43 @@ class FieldTest(unittest.TestCase):
                 self.assertEqual(employee.friends, friends)
                 self.assertEqual(q, 2)
 
+    def test_list_of_lists_of_references(self):
+
+        class User(Document):
+            name = StringField()
+
+        class Post(Document):
+            user_lists = ListField(ListField(ReferenceField(User)))
+
+        class SimpleList(Document):
+            users = ListField(ReferenceField(User))
+
+        User.drop_collection()
+        Post.drop_collection()
+
+        u1 = User.objects.create(name='u1')
+        u2 = User.objects.create(name='u2')
+        u3 = User.objects.create(name='u3')
+
+        SimpleList.objects.create(users=[u1, u2, u3])
+        self.assertEqual(SimpleList.objects.all()[0].users, [u1, u2, u3])
+
+        Post.objects.create(user_lists=[[u1, u2], [u3]])
+        self.assertEqual(Post.objects.all()[0].user_lists, [[u1, u2], [u3]])
+
     def test_circular_reference(self):
         """Ensure you can handle circular references
         """
+        class Relation(EmbeddedDocument):
+            name = StringField()
+            person = ReferenceField('Person')
+
         class Person(Document):
             name = StringField()
             relations = ListField(EmbeddedDocumentField('Relation'))
 
             def __repr__(self):
                 return "<Person: %s>" % self.name
-
-        class Relation(EmbeddedDocument):
-            name = StringField()
-            person = ReferenceField('Person')
 
         Person.drop_collection()
         mother = Person(name="Mother")
@@ -337,14 +389,10 @@ class FieldTest(unittest.TestCase):
                 return "<Person: %s>" % self.name
 
         Person.drop_collection()
-        paul = Person(name="Paul")
-        paul.save()
-        maria = Person(name="Maria")
-        maria.save()
-        julia = Person(name='Julia')
-        julia.save()
-        anna = Person(name='Anna')
-        anna.save()
+        paul = Person(name="Paul").save()
+        maria = Person(name="Maria").save()
+        julia = Person(name='Julia').save()
+        anna = Person(name='Anna').save()
 
         paul.other.friends = [maria, julia, anna]
         paul.other.name = "Paul's friends"
@@ -899,6 +947,8 @@ class FieldTest(unittest.TestCase):
 
         class Asset(Document):
             name = StringField(max_length=250, required=True)
+            path = StringField()
+            title = StringField()
             parent = GenericReferenceField(default=None)
             parents = ListField(GenericReferenceField())
             children = ListField(GenericReferenceField())
@@ -997,3 +1047,205 @@ class FieldTest(unittest.TestCase):
         msg = Message.objects.get(id=1)
         self.assertEqual(0, msg.comments[0].id)
         self.assertEqual(1, msg.comments[1].id)
+
+    def test_list_item_dereference_dref_false_save_doesnt_cause_extra_queries(self):
+        """Ensure that DBRef items in ListFields are dereferenced.
+        """
+        class User(Document):
+            name = StringField()
+
+        class Group(Document):
+            name = StringField()
+            members = ListField(ReferenceField(User, dbref=False))
+
+        User.drop_collection()
+        Group.drop_collection()
+
+        for i in xrange(1, 51):
+            User(name='user %s' % i).save()
+
+        Group(name="Test", members=User.objects).save()
+
+        with query_counter() as q:
+            self.assertEqual(q, 0)
+
+            group_obj = Group.objects.first()
+            self.assertEqual(q, 1)
+
+            group_obj.name = "new test"
+            group_obj.save()
+
+            self.assertEqual(q, 2)
+
+    def test_list_item_dereference_dref_true_save_doesnt_cause_extra_queries(self):
+        """Ensure that DBRef items in ListFields are dereferenced.
+        """
+        class User(Document):
+            name = StringField()
+
+        class Group(Document):
+            name = StringField()
+            members = ListField(ReferenceField(User, dbref=True))
+
+        User.drop_collection()
+        Group.drop_collection()
+
+        for i in xrange(1, 51):
+            User(name='user %s' % i).save()
+
+        Group(name="Test", members=User.objects).save()
+
+        with query_counter() as q:
+            self.assertEqual(q, 0)
+
+            group_obj = Group.objects.first()
+            self.assertEqual(q, 1)
+
+            group_obj.name = "new test"
+            group_obj.save()
+
+            self.assertEqual(q, 2)
+
+    def test_generic_reference_save_doesnt_cause_extra_queries(self):
+
+        class UserA(Document):
+            name = StringField()
+
+        class UserB(Document):
+            name = StringField()
+
+        class UserC(Document):
+            name = StringField()
+
+        class Group(Document):
+            name = StringField()
+            members = ListField(GenericReferenceField())
+
+        UserA.drop_collection()
+        UserB.drop_collection()
+        UserC.drop_collection()
+        Group.drop_collection()
+
+        members = []
+        for i in xrange(1, 51):
+            a = UserA(name='User A %s' % i).save()
+            b = UserB(name='User B %s' % i).save()
+            c = UserC(name='User C %s' % i).save()
+
+            members += [a, b, c]
+
+        Group(name="test", members=members).save()
+
+        with query_counter() as q:
+            self.assertEqual(q, 0)
+
+            group_obj = Group.objects.first()
+            self.assertEqual(q, 1)
+
+            group_obj.name = "new test"
+            group_obj.save()
+
+            self.assertEqual(q, 2)
+
+    def test_objectid_reference_across_databases(self):
+        # mongoenginetest - Is default connection alias from setUp()
+        # Register Aliases
+        register_connection('testdb-1', 'mongoenginetest2')
+
+        class User(Document):
+            name = StringField()
+            meta = {"db_alias": "testdb-1"}
+
+        class Book(Document):
+            name = StringField()
+            author = ReferenceField(User)
+
+        # Drops
+        User.drop_collection()
+        Book.drop_collection()
+
+        user = User(name="Ross").save()
+        Book(name="MongoEngine for pros", author=user).save()
+
+        # Can't use query_counter across databases - so test the _data object
+        book = Book.objects.first()
+        self.assertFalse(isinstance(book._data['author'], User))
+
+        book.select_related()
+        self.assertTrue(isinstance(book._data['author'], User))
+
+    def test_non_ascii_pk(self):
+        """
+        Ensure that dbref conversion to string does not fail when
+        non-ascii characters are used in primary key
+        """
+        class Brand(Document):
+            title = StringField(max_length=255, primary_key=True)
+
+        class BrandGroup(Document):
+            title = StringField(max_length=255, primary_key=True)
+            brands = ListField(ReferenceField("Brand", dbref=True))
+
+        Brand.drop_collection()
+        BrandGroup.drop_collection()
+
+        brand1 = Brand(title="Moschino").save()
+        brand2 = Brand(title=u"Денис Симачёв").save()
+
+        BrandGroup(title="top_brands", brands=[brand1, brand2]).save()
+        brand_groups = BrandGroup.objects().all()
+
+        self.assertEqual(2, len([brand for bg in brand_groups for brand in bg.brands]))
+
+    def test_dereferencing_embedded_listfield_referencefield(self):
+        class Tag(Document):
+            meta = {'collection': 'tags'}
+            name = StringField()
+
+        class Post(EmbeddedDocument):
+            body = StringField()
+            tags = ListField(ReferenceField("Tag", dbref=True))
+
+        class Page(Document):
+            meta = {'collection': 'pages'}
+            tags = ListField(ReferenceField("Tag", dbref=True))
+            posts = ListField(EmbeddedDocumentField(Post))
+
+        Tag.drop_collection()
+        Page.drop_collection()
+
+        tag = Tag(name='test').save()
+        post = Post(body='test body', tags=[tag])
+        Page(tags=[tag], posts=[post]).save()
+
+        page = Page.objects.first()
+        self.assertEqual(page.tags[0], page.posts[0].tags[0])
+
+    def test_select_related_follows_embedded_referencefields(self):
+
+        class Song(Document):
+            title = StringField()
+
+        class PlaylistItem(EmbeddedDocument):
+            song = ReferenceField("Song")
+
+        class Playlist(Document):
+            items = ListField(EmbeddedDocumentField("PlaylistItem"))
+
+        Playlist.drop_collection()
+        Song.drop_collection()
+
+        songs = [Song.objects.create(title="song %d" % i) for i in range(3)]
+        items = [PlaylistItem(song=song) for song in songs]
+        playlist = Playlist.objects.create(items=items)
+
+        with query_counter() as q:
+            self.assertEqual(q, 0)
+
+            playlist = Playlist.objects.first().select_related()
+            songs = [item.song for item in playlist.items]
+
+            self.assertEqual(q, 2)
+
+if __name__ == '__main__':
+    unittest.main()
